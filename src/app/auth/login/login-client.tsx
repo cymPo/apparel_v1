@@ -64,7 +64,12 @@ export default function LoginClient() {
     setOauthLoading(true);
 
     const supabase = createClient();
-    const redirectTo = `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`;
+    const safeNext = next.startsWith("/") ? next : "/dashboard";
+    const secureFlag = window.location.protocol === "https:" ? "; secure" : "";
+    document.cookie = `auth-next=${encodeURIComponent(
+      safeNext
+    )}; path=/; max-age=300; samesite=lax${secureFlag}`;
+    const redirectTo = `${window.location.origin}/auth/callback`;
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "azure",
       options: { redirectTo, scopes: "email" },

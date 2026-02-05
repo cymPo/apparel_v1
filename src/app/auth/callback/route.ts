@@ -21,12 +21,20 @@ type MutableCookies = {
 
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
+  const cookieStore = await cookies();
   const code = searchParams.get("code");
   const next = searchParams.get("next");
-  const redirectTo = next && next.startsWith("/") ? next : "/dashboard";
+  const nextCookie = cookieStore.get("auth-next")?.value;
+  const nextFromCookie = nextCookie ? decodeURIComponent(nextCookie) : null;
+  const redirectTo =
+    (next && next.startsWith("/") ? next : null) ??
+    (nextFromCookie && nextFromCookie.startsWith("/") ? nextFromCookie : "/dashboard");
+
+  if (nextCookie) {
+    (cookieStore as MutableCookies).set("auth-next", "", { path: "/", maxAge: 0 });
+  }
 
   if (code) {
-    const cookieStore = await cookies();
     const supabase = createServerClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
