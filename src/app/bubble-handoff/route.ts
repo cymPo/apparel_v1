@@ -77,6 +77,28 @@ function getBubbleIdToken(payload: unknown): string | undefined {
   return undefined;
 }
 
+function getJwtNonce(token: string): string | undefined {
+  // Supabase requires `nonce` to be passed if the id_token contains a nonce claim.
+  const parts = token.split(".");
+  if (parts.length < 2) return undefined;
+
+  const payloadB64Url = parts[1];
+  const payloadB64 = payloadB64Url.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = payloadB64.padEnd(payloadB64.length + ((4 - (payloadB64.length % 4)) % 4), "=");
+
+  try {
+    const json = Buffer.from(padded, "base64").toString("utf8");
+    const payload = JSON.parse(json) as unknown;
+    if (payload && typeof payload === "object" && "nonce" in payload) {
+      const nonce = (payload as { nonce?: unknown }).nonce;
+      return typeof nonce === "string" && nonce ? nonce : undefined;
+    }
+  } catch {
+    // ignore
+  }
+
+  return undefined;
+}
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
@@ -178,11 +200,20 @@ export async function GET(request: Request) {
       },
     }
   );
+  const nonce = getJwtNonce(idToken);
 
-  const { error } = await supabase.auth.signInWithIdToken({
-    provider: "azure",
-    token: idToken,
-  });
+  const { error } = await supabase.auth.signInWithIdToken(
+    nonce
+      ? {
+          provider: "azure",
+          token: idToken,
+          nonce,
+        }
+      : {
+          provider: "azure",
+          token: idToken,
+        }
+  );
 
   if (error) {
     console.error("[bubble-handoff] Supabase signInWithIdToken error", {
@@ -194,3 +225,4 @@ export async function GET(request: Request) {
 
   return NextResponse.redirect(`${origin}${next}`);
 }
+
