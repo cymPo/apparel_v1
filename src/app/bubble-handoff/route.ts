@@ -105,7 +105,15 @@ export async function GET(request: Request) {
 
   const idToken = redeemJson?.id_token;
   if (!idToken || typeof idToken !== "string") {
-    console.error("[bubble-handoff] Bubble redeem missing id_token");
+    const keys = redeemJson && typeof redeemJson === "object" ? Object.keys(redeemJson) : [];
+    console.error("[bubble-handoff] Bubble redeem missing id_token", {
+      keys,
+      hasErrorField: !!redeemJson?.error,
+    });
+
+    // If Bubble returned an empty JSON object, this is often a secret mismatch / condition-not-met.
+    if (keys.length === 0) return redirectFallback(origin, next, "bubble_empty_json");
+
     return redirectFallback(origin, next, "bubble_missing_id_token");
   }
 
@@ -140,4 +148,5 @@ export async function GET(request: Request) {
   }
 return NextResponse.redirect(`${origin}${next}`);
 }
+
 
