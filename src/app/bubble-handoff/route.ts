@@ -19,10 +19,9 @@ type MutableCookies = {
   ): void;
 };
 
-type BubbleRedeemResponse = {
-  id_token?: string;
-  error?: string;
-};
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
 
 function safeNextPath(next: string | null | undefined) {
   if (!next) return "/dashboard";
@@ -35,6 +34,47 @@ function redirectFallback(origin: string, next: string, reason: string) {
   // Non-sensitive reason code for debugging.
   url.searchParams.set("handoff_error", reason);
   return NextResponse.redirect(url);
+}
+
+function getBubbleError(payload: unknown): string | undefined {
+  if (!isRecord(payload)) return undefined;
+
+  const explicitError = payload["error"];
+  if (typeof explicitError === "string" && explicitError) return explicitError;
+
+  // Some Bubble setups wrap responses as { status: 'success'|'error', response: ... }
+  const status = payload["status"];
+  const response = payload["response"];
+  if (typeof status === "string" && status.toLowerCase() === "error") {
+    if (typeof response === "string" && response) return response;
+  }
+
+  return undefined;
+}
+
+function getBubbleIdToken(payload: unknown): string | undefined {
+  if (!isRecord(payload)) return undefined;
+
+  const direct = payload["id_token"];
+  if (typeof direct === "string" && direct) return direct;
+
+  const response = payload["response"];
+  if (typeof response === "string") {
+    // Sometimes response is a JSON string.
+    try {
+      const parsed = JSON.parse(response) as unknown;
+      return getBubbleIdToken(parsed);
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (isRecord(response)) {
+    const nested = response["id_token"];
+    if (typeof nested === "string" && nested) return nested;
+  }
+
+  return undefined;
 }
 
 export async function GET(request: Request) {
@@ -54,7 +94,7 @@ export async function GET(request: Request) {
     return redirectFallback(origin, next, "missing_secret_env");
   }
 
-  let redeemJson: BubbleRedeemResponse | null = null;
+  let redeemPayload: unknown = null;
 
   try {
     const controller = new AbortController();
@@ -83,10 +123,9 @@ export async function GET(request: Request) {
     }
 
     if (contentType.includes("application/json")) {
-      redeemJson = (await res.json()) as BubbleRedeemResponse;
+      redeemPayload = (await res.json()) as unknown;
     } else {
       const bodyText = await res.text();
-      // Bubble misconfigured returns (plain text / HTML) will land here.
       console.error("[bubble-handoff] Bubble redeem returned non-JSON", {
         contentType,
         bodyPreview: bodyText.slice(0, 300),
@@ -98,20 +137,25 @@ export async function GET(request: Request) {
     return redirectFallback(origin, next, "bubble_fetch_failed");
   }
 
-  if (redeemJson?.error) {
-    console.error("[bubble-handoff] Bubble redeem returned error", redeemJson.error);
-    return redirectFallback(origin, next, `bubble_${redeemJson.error}`);
+  const bubbleError = getBubbleError(redeemPayload);
+  if (bubbleError) {
+    console.error("[bubble-handoff] Bubble redeem returned error", bubbleError);
+    return redirectFallback(origin, next, `bubble_${bubbleError}`);
   }
 
-  const idToken = redeemJson?.id_token;
-  if (!idToken || typeof idToken !== "string") {
-    const keys = redeemJson && typeof redeemJson === "object" ? Object.keys(redeemJson) : [];
+  const idToken = getBubbleIdToken(redeemPayload);
+  if (!idToken) {
+    const keys = isRecord(redeemPayload) ? Object.keys(redeemPayload) : [];
+    const responseKeys =
+      isRecord(redeemPayload) && isRecord(redeemPayload["response"])
+        ? Object.keys(redeemPayload["response"])
+        : [];
+
     console.error("[bubble-handoff] Bubble redeem missing id_token", {
       keys,
-      hasErrorField: !!redeemJson?.error,
+      responseKeys,
     });
 
-    // If Bubble returned an empty JSON object, this is often a secret mismatch / condition-not-met.
     if (keys.length === 0) return redirectFallback(origin, next, "bubble_empty_json");
 
     return redirectFallback(origin, next, "bubble_missing_id_token");
@@ -139,6 +183,7 @@ export async function GET(request: Request) {
     provider: "azure",
     token: idToken,
   });
+
   if (error) {
     console.error("[bubble-handoff] Supabase signInWithIdToken error", {
       name: error.name,
@@ -146,7 +191,6 @@ export async function GET(request: Request) {
     });
     return redirectFallback(origin, next, "supabase_signin_failed");
   }
-return NextResponse.redirect(`${origin}${next}`);
+
+  return NextResponse.redirect(`${origin}${next}`);
 }
-
-
