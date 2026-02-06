@@ -29,23 +29,30 @@ function safeNextPath(next: string | null | undefined) {
   return next.startsWith("/") ? next : "/dashboard";
 }
 
+function redirectFallback(origin: string, next: string, reason: string) {
+  const url = new URL("/auth/microsoft", origin);
+  url.searchParams.set("next", next);
+  // Non-sensitive reason code for debugging.
+  url.searchParams.set("handoff_error", reason);
+  return NextResponse.redirect(url);
+}
+
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
   const next = safeNextPath(searchParams.get("next"));
 
-  // Fallback to your normal Microsoft OAuth flow if anything goes wrong.
-  const fallbackUrl = new URL("/auth/microsoft", origin);
-  fallbackUrl.searchParams.set("next", next);
-
-  if (!code) return NextResponse.redirect(fallbackUrl);
+  if (!code) return redirectFallback(origin, next, "missing_code");
 
   const redeemUrl =
     process.env.BUBBLE_REDEEM_HANDOFF_URL ??
     "https://demo-app-15880.bubbleapps.io/version-test/api/1.1/wf/redeem_handoff";
 
   const secret = process.env.BUBBLE_HANDOFF_SECRET;
-  if (!secret) return NextResponse.redirect(fallbackUrl);
+  if (!secret) {
+    console.error("[bubble-handoff] Missing BUBBLE_HANDOFF_SECRET env var");
+    return redirectFallback(origin, next, "missing_secret_env");
+  }
 
   let redeemJson: BubbleRedeemResponse | null = null;
 
@@ -63,14 +70,44 @@ export async function GET(request: Request) {
 
     clearTimeout(timeout);
 
-    // Bubble should return JSON, but don't assume perfect behavior.
-    redeemJson = (await res.json()) as BubbleRedeemResponse;
-  } catch {
-    return NextResponse.redirect(fallbackUrl);
+    const contentType = res.headers.get("content-type") ?? "";
+
+    if (!res.ok) {
+      const bodyText = await res.text().catch(() => "");
+      console.error("[bubble-handoff] Bubble redeem HTTP error", {
+        status: res.status,
+        contentType,
+        bodyPreview: bodyText.slice(0, 300),
+      });
+      return redirectFallback(origin, next, `bubble_http_${res.status}`);
+    }
+
+    if (contentType.includes("application/json")) {
+      redeemJson = (await res.json()) as BubbleRedeemResponse;
+    } else {
+      const bodyText = await res.text();
+      // Bubble misconfigured returns (plain text / HTML) will land here.
+      console.error("[bubble-handoff] Bubble redeem returned non-JSON", {
+        contentType,
+        bodyPreview: bodyText.slice(0, 300),
+      });
+      return redirectFallback(origin, next, "bubble_non_json");
+    }
+  } catch (e) {
+    console.error("[bubble-handoff] Bubble redeem fetch failed", e);
+    return redirectFallback(origin, next, "bubble_fetch_failed");
+  }
+
+  if (redeemJson?.error) {
+    console.error("[bubble-handoff] Bubble redeem returned error", redeemJson.error);
+    return redirectFallback(origin, next, `bubble_${redeemJson.error}`);
   }
 
   const idToken = redeemJson?.id_token;
-  if (!idToken || typeof idToken !== "string") return NextResponse.redirect(fallbackUrl);
+  if (!idToken || typeof idToken !== "string") {
+    console.error("[bubble-handoff] Bubble redeem missing id_token");
+    return redirectFallback(origin, next, "bubble_missing_id_token");
+  }
 
   const cookieStore = await cookies();
   const supabase = createServerClient(
@@ -94,8 +131,13 @@ export async function GET(request: Request) {
     provider: "azure",
     token: idToken,
   });
-
-  if (error) return NextResponse.redirect(fallbackUrl);
-
-  return NextResponse.redirect(`${origin}${next}`);
+  if (error) {
+    console.error("[bubble-handoff] Supabase signInWithIdToken error", {
+      name: error.name,
+      message: error.message,
+    });
+    return redirectFallback(origin, next, "supabase_signin_failed");
+  }
+return NextResponse.redirect(`${origin}${next}`);
 }
+
